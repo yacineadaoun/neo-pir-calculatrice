@@ -15,7 +15,7 @@ from reportlab.pdfgen import canvas
 # ============================================================
 # CONFIG
 # ============================================================
-APP_TITLE = "NEO PI-R — Calculatrice Manuelle (200 copies)"
+APP_TITLE = "NEO PI-R —C by ADAOUN YACINE"
 DB_PATH = "neo_pir.db"
 SCORING_KEY_CSV = "scoring_key.csv"
 
