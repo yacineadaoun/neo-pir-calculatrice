@@ -385,10 +385,32 @@ st.caption("Saisie manuelle assistée • Calcul instantané • Sauvegarde • 
 
 st.markdown("""
 <style>
-.big button{height:88px !important; font-size:30px !important; font-weight:900 !important; border-radius:24px !important; width:100% !important;}
-.nav button{height:52px !important; font-size:18px !important; font-weight:800 !important; border-radius:16px !important; width:100% !important;}
-.card{border:1px solid rgba(255,255,255,.12); border-radius:18px; padding:14px 16px; background:rgba(255,255,255,.03);}
-.pill{display:inline-block; padding:8px 12px; border-radius:999px; font-weight:900; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.14);}
+/* Tous les boutons Streamlit (desktop + mobile) */
+div.stButton > button, div.stDownloadButton > button {
+    height: 92px !important;
+    font-size: 30px !important;
+    font-weight: 900 !important;
+    border-radius: 24px !important;
+    width: 100% !important;
+}
+
+/* Boutons “navigation” un peu moins hauts */
+button:has(span:contains("Précédent")),
+button:has(span:contains("Suivant")),
+button:has(span:contains("+10")),
+button:has(span:contains("-10")) {
+    height: 60px !important;
+    font-size: 20px !important;
+    border-radius: 18px !important;
+}
+
+/* Sur petits écrans (téléphone) : encore plus grand */
+@media (max-width: 600px) {
+  div.stButton > button, div.stDownloadButton > button {
+      height: 105px !important;
+      font-size: 34px !important;
+  }
+}
 </style>
 """, unsafe_allow_html=True)
 
