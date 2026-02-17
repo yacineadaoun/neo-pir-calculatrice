@@ -366,7 +366,7 @@ def build_pdf_report_bytes(patient_id: str, patient_name: str, status: dict,
 # ============================================================
 st.set_page_config(page_title=APP_TITLE, page_icon="🧮", layout="wide")
 st.title(APP_TITLE)
-st.caption("Correction rapide : 1 item → 5 boutons → item suivant. Objectif 200 copies.")
+st.caption("Correction rapide : 1 item → 5 boutons → item suivant.")
 
 st.markdown("""
 <style>
