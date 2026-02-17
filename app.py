@@ -23,7 +23,7 @@ APP_TITLE = "NEO PI-R — Calculatrice Pro (ADAOUN YACINE)"
 DB_PATH = "neo_pir.db"
 SCORING_KEY_CSV = "scoring_key.csv"
 
-OPTIONS = ["FD", "D", "N", "A", "FA"]
+OPTIONS = ["FD", "D", "N", "A", "FA"]  # index 0..4
 OPT_TO_IDX = {k: i for i, k in enumerate(OPTIONS)}
 IDX_TO_OPT = {i: k for i, k in enumerate(OPTIONS)}
 
@@ -52,10 +52,14 @@ FACET_ORDER = [
 def load_scoring_key_csv(path: str) -> Dict[int, List[int]]:
     if not os.path.exists(path):
         raise FileNotFoundError(
-            f"'{path}' introuvable. Mets scoring_key.csv à la racine du repo."
+            f"❌ '{path}' introuvable.\n\n➡️ Mets 'scoring_key.csv' à la racine du repo."
         )
     with open(path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        required = {"item", "FD", "D", "N", "A", "FA"}
+        if not required.issubset(set(reader.fieldnames or [])):
+            raise ValueError("❌ scoring_key.csv doit contenir: item, FD, D, N, A, FA")
+
         key: Dict[int, List[int]] = {}
         for row in reader:
             item = int(row["item"])
@@ -63,7 +67,7 @@ def load_scoring_key_csv(path: str) -> Dict[int, List[int]]:
 
     missing = [i for i in range(1, 241) if i not in key]
     if missing:
-        raise ValueError(f"scoring_key.csv incomplet. Items manquants: {missing[:30]}")
+        raise ValueError(f"❌ scoring_key.csv incomplet. Items manquants (ex): {missing[:30]}")
     return key
 
 
@@ -113,11 +117,11 @@ class ProtocolRules:
     max_blank_invalid: int = 15
     max_N_invalid: int = 42
     impute_blank_if_leq: int = 10
-    impute_option_index: int = 2
+    impute_option_index: int = 2  # N
 
 
 # ============================================================
-# 4) DB
+# 4) DB (robuste Streamlit Cloud)
 # ============================================================
 @st.cache_resource(show_spinner=False)
 def get_conn() -> sqlite3.Connection:
@@ -131,18 +135,24 @@ def get_conn() -> sqlite3.Connection:
 def init_db():
     conn = get_conn()
     conn.execute("""
-    CREATE TABLE IF NOT EXISTS patients (
+    CREATE TABLE IF NOT EXISTS patients(
         patient_id TEXT PRIMARY KEY,
         name TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
     conn.execute("""
-    CREATE TABLE IF NOT EXISTS responses (
+    CREATE TABLE IF NOT EXISTS responses(
         patient_id TEXT,
         item_id INTEGER,
         response_idx INTEGER,
         updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (patient_id, item_id)
+        PRIMARY KEY(patient_id, item_id)
+    )""")
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS settings(
+        patient_id TEXT PRIMARY KEY,
+        current_item INTEGER DEFAULT 1,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
     conn.commit()
 
@@ -150,7 +160,7 @@ def init_db():
 def upsert_patient(patient_id: str, name: str):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO patients(patient_id, name) VALUES(?, ?) "
+        "INSERT INTO patients(patient_id,name) VALUES(?,?) "
         "ON CONFLICT(patient_id) DO UPDATE SET name=excluded.name",
         (patient_id, name)
     )
@@ -175,9 +185,25 @@ def load_responses(patient_id: str) -> Dict[int, int]:
 def save_response(patient_id: str, item_id: int, response_idx: int):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO responses(patient_id, item_id, response_idx) VALUES(?,?,?) "
-        "ON CONFLICT(patient_id, item_id) DO UPDATE SET response_idx=excluded.response_idx, updated_at=CURRENT_TIMESTAMP",
+        "INSERT INTO responses(patient_id,item_id,response_idx) VALUES(?,?,?) "
+        "ON CONFLICT(patient_id,item_id) DO UPDATE SET response_idx=excluded.response_idx, updated_at=CURRENT_TIMESTAMP",
         (patient_id, item_id, response_idx)
+    )
+    conn.commit()
+
+
+def load_current_item(patient_id: str) -> int:
+    conn = get_conn()
+    row = conn.execute("SELECT current_item FROM settings WHERE patient_id=?", (patient_id,)).fetchone()
+    return int(row["current_item"]) if row else 1
+
+
+def save_current_item(patient_id: str, current_item: int):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO settings(patient_id,current_item) VALUES(?,?) "
+        "ON CONFLICT(patient_id) DO UPDATE SET current_item=excluded.current_item, updated_at=CURRENT_TIMESTAMP",
+        (patient_id, current_item)
     )
     conn.commit()
 
@@ -222,42 +248,136 @@ def compute_scores(responses: Dict[int, int], scoring_key: Dict[int, List[int]])
 
 
 # ============================================================
-# UI HELPERS
+# 6) GRAPHIQUES
 # ============================================================
-def item_from_rc(r: int, c: int) -> int:
-    return r + 30 * c  # r in 1..30, c in 0..7
+def plot_domains_radar(domain_scores: Dict[str, int]):
+    labels = DOMAIN_ORDER
+    values = [domain_scores[k] for k in labels] + [domain_scores[labels[0]]]
+    angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
+    angles += angles[:1]
+    fig = plt.figure(figsize=(6, 6))
+    ax = plt.subplot(111, polar=True)
+    ax.plot(angles, values, linewidth=2)
+    ax.fill(angles, values, alpha=0.1)
+    ax.set_thetagrids(np.degrees(angles[:-1]), labels)
+    ax.set_title("Domaines (scores bruts)")
+    return fig
 
 
-def color_for_idx(idx: int) -> str:
-    if idx == -1:
-        return "#2a2a2a"
-    # palette distincte
-    return ["#7c3aed", "#2563eb", "#16a34a", "#f59e0b", "#ef4444"][idx]
+def plot_facets_line(facette_scores: Dict[str, int]):
+    y = [facette_scores[k] for k in FACET_ORDER]
+    fig = plt.figure(figsize=(14, 4))
+    ax = plt.gca()
+    ax.plot(range(len(FACET_ORDER)), y, marker="o", linewidth=2)
+    ax.set_xticks(range(len(FACET_ORDER)))
+    ax.set_xticklabels(FACET_ORDER, rotation=60, ha="right")
+    ax.set_title("Facettes (scores bruts)")
+    ax.set_ylabel("Score brut")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.3)
+    plt.tight_layout()
+    return fig
+
+
+def fig_to_bytes(fig, fmt: str) -> bytes:
+    buf = io.BytesIO()
+    fig.savefig(buf, format=fmt, bbox_inches="tight")
+    buf.seek(0)
+    return buf.getvalue()
 
 
 # ============================================================
-# APP
+# 7) PDF
+# ============================================================
+def build_pdf_report_bytes(patient_id: str, patient_name: str, status: dict,
+                           facette_scores: Dict[str, int], domain_scores: Dict[str, int]) -> bytes:
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    width, height = A4
+
+    y = height - 50
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(40, y, "RAPPORT NEO PI-R — Scores bruts")
+    y -= 22
+
+    c.setFont("Helvetica", 11)
+    c.drawString(40, y, f"Patient ID: {patient_id}")
+    y -= 14
+    c.drawString(40, y, f"Nom: {patient_name}")
+    y -= 18
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, f"STATUT PROTOCOLE: {'VALIDE' if status['valid'] else 'INVALIDE'}")
+    y -= 14
+
+    c.setFont("Helvetica", 10)
+    c.drawString(40, y, f"Items vides: {status['n_blank']} | N observés: {status['n_count']} | Imputations: {status['imputed']}")
+    y -= 16
+
+    if status["reasons"]:
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(40, y, "Raisons:")
+        y -= 12
+        c.setFont("Helvetica", 10)
+        for r in status["reasons"]:
+            c.drawString(50, y, f"- {r}")
+            y -= 11
+        y -= 6
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, "DOMAINES")
+    y -= 14
+    c.setFont("Helvetica", 10)
+    for d in DOMAIN_ORDER:
+        c.drawString(40, y, f"{domain_labels[d]} ({d}): {domain_scores[d]}")
+        y -= 12
+    y -= 6
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y, "FACETTES")
+    y -= 14
+    c.setFont("Helvetica", 9)
+    for fac in FACET_ORDER:
+        c.drawString(40, y, f"{facette_labels[fac]}: {facette_scores[fac]}")
+        y -= 11
+        if y < 60:
+            c.showPage()
+            y = height - 50
+            c.setFont("Helvetica", 9)
+
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ============================================================
+# UI
 # ============================================================
 st.set_page_config(page_title=APP_TITLE, page_icon="🧮", layout="wide")
 st.title(APP_TITLE)
-st.caption("Interface grille 30×8 + gros boutons • Correction rapide (200 copies)")
+st.caption("Objectif : corriger 200 copies rapidement (Item 1 → 240). 1 clic = 1 réponse.")
 
 st.markdown("""
 <style>
-.cellbtn button{height:34px !important; font-size:12px !important; font-weight:800 !important; border-radius:10px !important; width:100% !important;}
-.bigbtn button{height:84px !important; font-size:28px !important; font-weight:900 !important; border-radius:22px !important; width:100% !important;}
-.panel{border:1px solid rgba(255,255,255,.12); border-radius:18px; padding:12px 14px; background:rgba(255,255,255,.03);}
+.big button{height:88px !important; font-size:30px !important; font-weight:900 !important; border-radius:24px !important; width:100% !important;}
+.nav button{height:52px !important; font-size:18px !important; font-weight:800 !important; border-radius:16px !important; width:100% !important;}
+.card{border:1px solid rgba(255,255,255,.12); border-radius:18px; padding:14px 16px; background:rgba(255,255,255,.03);}
+.pill{display:inline-block; padding:8px 12px; border-radius:999px; font-weight:900; background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.14);}
 </style>
 """, unsafe_allow_html=True)
 
 init_db()
-scoring_key = load_scoring_key_csv(SCORING_KEY_CSV)
+
+try:
+    scoring_key = load_scoring_key_csv(SCORING_KEY_CSV)
+except Exception as e:
+    st.error(str(e))
+    st.stop()
 
 with st.sidebar:
-    st.subheader("Patient")
+    st.subheader("👤 Patient")
     mode = st.radio("Mode", ["Ouvrir", "Créer"], index=0)
-    existing = list_patients()
 
+    existing = list_patients()
     if mode == "Ouvrir":
         if existing:
             labels = [f"{pid} — {name}" if name else pid for pid, name in existing]
@@ -268,15 +388,15 @@ with st.sidebar:
             st.warning("Aucun patient. Crée un patient.")
             st.stop()
     else:
-        patient_id = st.text_input("Patient ID", value="")
-        patient_name = st.text_input("Nom", value="")
+        patient_id = st.text_input("Patient ID (unique)", value="")
+        patient_name = st.text_input("Nom / Prénom", value="")
         if st.button("✅ Créer", type="primary", disabled=(not patient_id.strip())):
             upsert_patient(patient_id.strip(), patient_name.strip())
-            st.success("Créé ✅ (repasse en Ouvrir)")
+            st.success("Patient créé ✅ (repasse en mode Ouvrir)")
             st.stop()
 
     st.markdown("---")
-    st.subheader("Protocole")
+    st.subheader("🧾 Protocole")
     rules = ProtocolRules(
         max_blank_invalid=st.number_input("Items vides ⇒ invalide si ≥", 0, 240, 15),
         max_N_invalid=st.number_input("Réponses N ⇒ invalide si ≥", 0, 240, 42),
@@ -284,184 +404,173 @@ with st.sidebar:
         impute_option_index=2
     )
 
+# data
 responses = load_responses(patient_id)
+saved = load_current_item(patient_id)
+if "current_item" not in st.session_state:
+    st.session_state.current_item = int(saved)
 
-if "sel_r" not in st.session_state:
-    st.session_state.sel_r = 1
-if "sel_c" not in st.session_state:
-    st.session_state.sel_c = 0
-
-# header progress
 answered = sum(1 for i in range(1, 241) if responses[i] != -1)
 st.progress(answered / 240.0)
-st.write(f"Progression : **{answered}/240**")
+st.write(f"Progression: **{answered}/240** réponses")
 
 final_resp, status = apply_protocol_rules(responses, rules)
 facette_scores, domain_scores = compute_scores(final_resp, scoring_key)
 
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Vides", status["n_blank"])
-k2.metric("N", status["n_count"])
-k3.metric("Imputés", status["imputed"])
+k1.metric("Items vides", status["n_blank"])
+k2.metric("N observés", status["n_count"])
+k3.metric("Imputations", status["imputed"])
 k4.metric("Protocole", "VALIDE" if status["valid"] else "INVALIDE")
 
-tabs = st.tabs(["🧾 Grille", "📊 Résultats", "📦 Exports"])
+tabs = st.tabs(["🧮 Saisie", "📊 Résultats", "📦 Exports"])
 
 # ============================================================
-# TAB GRILLE
+# TAB 1 — SAISIE ITEM PAR ITEM
 # ============================================================
 with tabs[0]:
-    left, right = st.columns([2.2, 1], gap="large")
+    st.markdown('<div class="card">', unsafe_allow_html=True)
 
-    # ----------- GRID 30x8
-    with left:
-        st.markdown('<div class="panel">', unsafe_allow_html=True)
-        st.subheader("Grille 30×8 (clique pour éditer)")
-
-        # colon headers
-        header = st.columns(8)
-        for j in range(8):
-            header[j].markdown(f"**Col {j+1}**")
-
-        # grid rows
-        for r in range(1, 31):
-            cols = st.columns(8, gap="small")
-            for c in range(8):
-                it = item_from_rc(r, c)
-                idx = responses[it]
-                label = "—" if idx == -1 else IDX_TO_OPT[idx]
-                bg = color_for_idx(idx)
-
-                # button style per cell via markdown hack
-                cols[c].markdown(
-                    f"""
-                    <div class="cellbtn">
-                        <style>
-                        div[data-testid="stVerticalBlock"] > div:has(> div.cellbtn-{it}) button {{
-                            background: {bg} !important;
-                            color: white !important;
-                        }}
-                        </style>
-                        <div class="cellbtn-{it}"></div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True
-                )
-                if cols[c].button(f"{it}:{label}", key=f"cell_{it}", use_container_width=True):
-                    st.session_state.sel_r = r
-                    st.session_state.sel_c = c
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # ----------- RIGHT PANEL (selected item)
-    with right:
-        st.markdown('<div class="panel">', unsafe_allow_html=True)
-        sel_item = item_from_rc(int(st.session_state.sel_r), int(st.session_state.sel_c))
-        cur = responses[sel_item]
-        cur_label = "VIDE" if cur == -1 else IDX_TO_OPT[cur]
-
-        st.subheader("Éditeur rapide")
-        st.write(f"Item sélectionné: **{sel_item}**")
-        st.write(f"Réponse actuelle: **{cur_label}**")
-        st.write(f"Facette: **{item_to_facette.get(sel_item,'?')}**")
-
-        # Big buttons in 2 rows
-        b1, b2 = st.columns(2)
-        with b1:
-            st.markdown('<div class="bigbtn">', unsafe_allow_html=True)
-            if st.button("FD", use_container_width=True):
-                save_response(patient_id, sel_item, 0)
+    topL, topM, topR = st.columns([1, 1, 1.2])
+    with topL:
+        item = st.number_input("Item", 1, 240, int(st.session_state.current_item), step=1)
+        item = int(item)
+        st.session_state.current_item = item
+    with topM:
+        go = st.text_input("Aller à item", value="", placeholder="ex: 120")
+        if go.strip().isdigit():
+            gi = int(go.strip())
+            if 1 <= gi <= 240:
+                st.session_state.current_item = gi
+                save_current_item(patient_id, gi)
                 st.experimental_rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        with b2:
-            st.markdown('<div class="bigbtn">', unsafe_allow_html=True)
-            if st.button("D", use_container_width=True):
-                save_response(patient_id, sel_item, 1)
-                st.experimental_rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        b3, b4 = st.columns(2)
-        with b3:
-            st.markdown('<div class="bigbtn">', unsafe_allow_html=True)
-            if st.button("N", use_container_width=True):
-                save_response(patient_id, sel_item, 2)
-                st.experimental_rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-        with b4:
-            st.markdown('<div class="bigbtn">', unsafe_allow_html=True)
-            if st.button("A", use_container_width=True):
-                save_response(patient_id, sel_item, 3)
-                st.experimental_rerun()
-            st.markdown("</div>", unsafe_allow_html=True)
-
-        st.markdown('<div class="bigbtn">', unsafe_allow_html=True)
-        if st.button("FA", use_container_width=True):
-            save_response(patient_id, sel_item, 4)
-            st.experimental_rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        if st.button("🧽 VIDE", use_container_width=True):
-            save_response(patient_id, sel_item, -1)
-            st.experimental_rerun()
-
-        st.markdown("---")
-        if st.button("➡️ Aller au prochain VIDE", use_container_width=True):
+    with topR:
+        if st.button("➡️ Prochain VIDE", use_container_width=True):
             blanks = [i for i, v in responses.items() if v == -1]
             if blanks:
-                nxt = blanks[0]
-                # convertir item->(r,c)
-                r = ((nxt - 1) % 30) + 1
-                c = (nxt - 1) // 30
-                st.session_state.sel_r = r
-                st.session_state.sel_c = c
+                st.session_state.current_item = blanks[0]
+                save_current_item(patient_id, st.session_state.current_item)
                 st.experimental_rerun()
             else:
-                st.success("Aucun vide ✅")
+                st.success("Aucun item vide ✅")
 
-        st.markdown("</div>", unsafe_allow_html=True)
+    current_idx = responses[item]
+    current_label = "VIDE" if current_idx == -1 else IDX_TO_OPT[current_idx]
+    st.markdown(f"Réponse actuelle: <span class='pill'>{current_label}</span>", unsafe_allow_html=True)
+    st.write(f"Facette: **{item_to_facette.get(item, '?')}**")
 
+    # FORM = 1 clic = save + next
+    with st.form("answer_form", clear_on_submit=False):
+        row1 = st.columns(3)
+        row2 = st.columns(3)
+        clicked = None
+
+        # FD D N
+        with row1[0]:
+            st.markdown("<div class='big'>", unsafe_allow_html=True)
+            if st.form_submit_button("FD", use_container_width=True):
+                clicked = 0
+            st.markdown("</div>", unsafe_allow_html=True)
+        with row1[1]:
+            st.markdown("<div class='big'>", unsafe_allow_html=True)
+            if st.form_submit_button("D", use_container_width=True):
+                clicked = 1
+            st.markdown("</div>", unsafe_allow_html=True)
+        with row1[2]:
+            st.markdown("<div class='big'>", unsafe_allow_html=True)
+            if st.form_submit_button("N", use_container_width=True):
+                clicked = 2
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # A FA VIDE
+        with row2[0]:
+            st.markdown("<div class='big'>", unsafe_allow_html=True)
+            if st.form_submit_button("A", use_container_width=True):
+                clicked = 3
+            st.markdown("</div>", unsafe_allow_html=True)
+        with row2[1]:
+            st.markdown("<div class='big'>", unsafe_allow_html=True)
+            if st.form_submit_button("FA", use_container_width=True):
+                clicked = 4
+            st.markdown("</div>", unsafe_allow_html=True)
+        with row2[2]:
+            st.markdown("<div class='big'>", unsafe_allow_html=True)
+            if st.form_submit_button("VIDE", use_container_width=True):
+                clicked = -1
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        if clicked is not None:
+            save_response(patient_id, item, int(clicked))
+            nxt = min(240, item + 1)
+            st.session_state.current_item = nxt
+            save_current_item(patient_id, nxt)
+            st.experimental_rerun()
+
+    nav = st.columns(4)
+    for i, (lab, delta) in enumerate([("⬅️ Précédent", -1), ("➡️ Suivant", +1), ("⏭️ +10", +10), ("⏮️ -10", -10)]):
+        with nav[i]:
+            st.markdown("<div class='nav'>", unsafe_allow_html=True)
+            if st.button(lab, use_container_width=True):
+                st.session_state.current_item = int(min(240, max(1, item + delta)))
+                save_current_item(patient_id, st.session_state.current_item)
+                st.experimental_rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # ============================================================
-# TAB RESULTATS
+# TAB 2 — RESULTATS
 # ============================================================
 with tabs[1]:
-    st.subheader("Résultats")
-    col1, col2 = st.columns(2)
-    with col1:
+    st.subheader("Résultats (temps réel)")
+    c1, c2 = st.columns([1, 1], gap="large")
+    with c1:
         st.markdown("### Domaines")
         st.dataframe(
             [{"Code": d, "Domaine": domain_labels[d], "Score brut": domain_scores[d]} for d in DOMAIN_ORDER],
             hide_index=True, use_container_width=True
         )
-    with col2:
+        st.pyplot(plot_domains_radar(domain_scores))
+    with c2:
         st.markdown("### Facettes")
         st.dataframe(
             [{"Code": f, "Facette": facette_labels[f], "Score brut": facette_scores[f]} for f in FACET_ORDER],
             hide_index=True, use_container_width=True
         )
-
+        st.pyplot(plot_facets_line(facette_scores))
 
 # ============================================================
-# TAB EXPORTS (minimal)
+# TAB 3 — EXPORTS
 # ============================================================
 with tabs[2]:
-    st.subheader("Exports")
+    st.subheader("Exports (CSV + PDF + PNG)")
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["patient_id", patient_id])
     w.writerow(["name", patient_name])
-    w.writerow(["valid", status["valid"]])
-    w.writerow(["blanks", status["n_blank"]])
-    w.writerow(["n_count", status["n_count"]])
-    w.writerow(["imputed", status["imputed"]])
+    w.writerow([])
+    w.writerow(["PROTOCOLE", "VALIDE" if status["valid"] else "INVALIDE"])
+    w.writerow(["items_vides", status["n_blank"]])
+    w.writerow(["n_observes", status["n_count"]])
+    w.writerow(["imputations", status["imputed"]])
     w.writerow([])
     w.writerow(["DOMAINES"])
+    w.writerow(["code", "label", "score_brut"])
     for d in DOMAIN_ORDER:
         w.writerow([d, domain_labels[d], domain_scores[d]])
     w.writerow([])
     w.writerow(["FACETTES"])
+    w.writerow(["code", "label", "score_brut"])
     for f in FACET_ORDER:
         w.writerow([f, facette_labels[f], facette_scores[f]])
 
     st.download_button("📥 Télécharger CSV", out.getvalue(), f"{patient_id}_neo_pir.csv", "text/csv")
+
+    pdf_bytes = build_pdf_report_bytes(patient_id, patient_name, status, facette_scores, domain_scores)
+    st.download_button("📥 Télécharger PDF", pdf_bytes, f"{patient_id}_neo_pir_report.pdf", "application/pdf")
+
+    fig_r = plot_domains_radar(domain_scores)
+    st.download_button("📥 Domaines PNG", fig_to_bytes(fig_r, "png"), f"{patient_id}_domains.png", "image/png")
+
+    fig_f = plot_facets_line(facette_scores)
+    st.download_button("📥 Facettes PNG", fig_to_bytes(fig_f, "png"), f"{patient_id}_facettes.png", "image/png")
