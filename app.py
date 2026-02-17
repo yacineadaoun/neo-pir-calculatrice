@@ -122,7 +122,7 @@ class ProtocolRules:
 
 
 # ============================================================
-# 4) DB (robuste)
+# 4) DB (robuste Streamlit Cloud)
 # ============================================================
 @st.cache_resource(show_spinner=False)
 def get_conn() -> sqlite3.Connection:
@@ -165,6 +165,14 @@ def upsert_patient(patient_id: str, name: str):
         "ON CONFLICT(patient_id) DO UPDATE SET name=excluded.name",
         (patient_id, name)
     )
+    conn.commit()
+
+
+def delete_patient(patient_id: str):
+    conn = get_conn()
+    conn.execute("DELETE FROM responses WHERE patient_id=?", (patient_id,))
+    conn.execute("DELETE FROM settings WHERE patient_id=?", (patient_id,))
+    conn.execute("DELETE FROM patients WHERE patient_id=?", (patient_id,))
     conn.commit()
 
 
@@ -225,7 +233,14 @@ def apply_protocol_rules(responses: Dict[int, int], rules: ProtocolRules) -> Tup
     n_blank = len(blanks)
     n_count = sum(1 for v in responses.values() if v == 2)
 
-    status = {"valid": True, "reasons": [], "n_blank": n_blank, "n_count": n_count, "imputed": 0, "blank_items": blanks}
+    status = {
+        "valid": True,
+        "reasons": [],
+        "n_blank": n_blank,
+        "n_count": n_count,
+        "imputed": 0,
+        "blank_items": blanks
+    }
 
     if n_blank >= rules.max_blank_invalid:
         status["valid"] = False
@@ -366,7 +381,7 @@ def build_pdf_report_bytes(patient_id: str, patient_name: str, status: dict,
 # ============================================================
 st.set_page_config(page_title=APP_TITLE, page_icon="🧮", layout="wide")
 st.title(APP_TITLE)
-st.caption("Correction rapide : 1 item → 5 boutons → item suivant.")
+st.caption("Saisie manuelle assistée • Calcul instantané • Sauvegarde • Exports")
 
 st.markdown("""
 <style>
@@ -385,6 +400,10 @@ except Exception as e:
     st.error(str(e))
     st.stop()
 
+# state for delete confirmation
+if "confirm_delete_open" not in st.session_state:
+    st.session_state.confirm_delete_open = False
+
 with st.sidebar:
     st.subheader("👤 Patient")
     mode = st.radio("Mode", ["Ouvrir", "Créer"], index=0)
@@ -395,6 +414,7 @@ with st.sidebar:
         if not existing:
             st.warning("Aucun patient. Crée un patient.")
             st.stop()
+
         labels = [f"{pid} — {name}" if name else pid for pid, name in existing]
         pick = st.selectbox("Sélection", labels, index=0)
         patient_id = pick.split(" — ")[0].strip()
@@ -416,9 +436,33 @@ with st.sidebar:
         impute_option_index=2
     )
 
+    # Delete patient (secure)
+    st.markdown("---")
+    st.subheader("⚠️ Gestion patient")
+
+    if mode == "Ouvrir":
+        if st.button("🗑 Supprimer patient", use_container_width=True):
+            st.session_state.confirm_delete_open = True
+
+        if st.session_state.confirm_delete_open:
+            st.warning("Suppression définitive. Cette action est irréversible.")
+            confirm = st.text_input("Tape le Patient ID pour confirmer", value="", placeholder=patient_id)
+            colx, coly = st.columns(2)
+            with colx:
+                if st.button("Annuler", use_container_width=True):
+                    st.session_state.confirm_delete_open = False
+                    rerun()
+            with coly:
+                if st.button("Confirmer suppression", use_container_width=True, type="primary", disabled=(confirm.strip() != patient_id)):
+                    delete_patient(patient_id)
+                    st.session_state.confirm_delete_open = False
+                    st.success("Patient supprimé ✅")
+                    rerun()
+
 # data
 responses = load_responses(patient_id)
 saved_item = load_current_item(patient_id)
+
 if "current_item" not in st.session_state:
     st.session_state.current_item = int(saved_item)
 
@@ -480,11 +524,21 @@ with tabs[0]:
     st.markdown(f"Réponse actuelle: <span class='pill'>{current_label}</span>", unsafe_allow_html=True)
     st.write(f"Facette: **{item_to_facette.get(item, '?')}**")
 
-    # 1 clic = save + next
-    with st.form("answer_form", clear_on_submit=False):
-        clicked = st.session_state.get("clicked", None)
-        st.session_state["clicked"] = None
+    # Reset answer
+    rc1, rc2 = st.columns([1.2, 3])
+    with rc1:
+        if st.button("🧹 Réinitialiser réponse", use_container_width=True):
+            save_response(patient_id, item, -1)
+            save_current_item(patient_id, item)
+            rerun()
+    with rc2:
+        st.caption("Efface la réponse de l’item courant (met VIDE).")
 
+    st.markdown("---")
+
+    # 1 clic = save + next (gros boutons)
+    with st.form("answer_form", clear_on_submit=False):
+        clicked = None
         r1 = st.columns(3)
         r2 = st.columns(3)
 
@@ -493,13 +547,11 @@ with tabs[0]:
             if st.form_submit_button("FD", use_container_width=True):
                 clicked = 0
             st.markdown("</div>", unsafe_allow_html=True)
-
         with r1[1]:
             st.markdown("<div class='big'>", unsafe_allow_html=True)
             if st.form_submit_button("D", use_container_width=True):
                 clicked = 1
             st.markdown("</div>", unsafe_allow_html=True)
-
         with r1[2]:
             st.markdown("<div class='big'>", unsafe_allow_html=True)
             if st.form_submit_button("N", use_container_width=True):
@@ -511,13 +563,11 @@ with tabs[0]:
             if st.form_submit_button("A", use_container_width=True):
                 clicked = 3
             st.markdown("</div>", unsafe_allow_html=True)
-
         with r2[1]:
             st.markdown("<div class='big'>", unsafe_allow_html=True)
             if st.form_submit_button("FA", use_container_width=True):
                 clicked = 4
             st.markdown("</div>", unsafe_allow_html=True)
-
         with r2[2]:
             st.markdown("<div class='big'>", unsafe_allow_html=True)
             if st.form_submit_button("VIDE", use_container_width=True):
