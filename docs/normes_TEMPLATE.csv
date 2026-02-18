@@ -1,48 +1,44 @@
+# Normes NEO PI-R — Implémentation (Cabinet Pro)
 
----
+## 1) Pourquoi les normes ?
+Les scores bruts n’ont pas de sens clinique direct sans comparaison à une population de référence.
+Le manuel prévoit une section “Normes” (Normas). :contentReference[oaicite:7]{index=7}
 
-## 7) docs/interpretation.md (depuis le manuel pro, version paraphrasée)
+## 2) Source de normes
+Deux options “propres” pour ton repo GitHub :
 
-Le manuel explique la **structure hiérarchique** (5 domaines, 30 facettes) et donne des **pistes d’interprétation** à partir des profils (domaines/facettes). :contentReference[oaicite:2]{index=2}
+### Option A — CSV normatifs (recommandée)
+Tu fournis des tables normatives exportées légalement sous forme CSV :
 
-Crée ce fichier :
+- `data/norms_f.csv` (Femmes)
+- `data/norms_m.csv` (Hommes)
 
-```md
-# Interprétation — NEO PI-R (guide de lecture clinique)
+Schéma recommandé :
+- `scale` : ex. N, E, O, A, C, N1..C6
+- `raw_min`, `raw_max` (ou `raw`)
+- `t_score`
+- `percentile` (si disponible)
+- `band` (Très faible / Faible / Moyen / Élevé / Très élevé)
 
-> Document de travail (paraphrase).  
-> Référence: Manuel Professionnel NEO PI-R (structure domaines/facettes + principes d’interprétation). :contentReference[oaicite:3]{index=3}
+Avantage : conversion automatique et reproductible.
 
-## 1) Structure du NEO PI-R
-Le NEO PI-R organise la personnalité en **5 domaines** (N, E, O, A, C), chacun subdivisé en **6 facettes** (30 au total).  
-Le tableau “Domínios / Facetas” (visible dans le manuel) liste explicitement N/E/O/A/C et N1..C6. :contentReference[oaicite:4]{index=4}
+### Option B — Lecture via la feuille de profil officielle
+Tu utilises la feuille de profil (Hommes/Femmes) comme référence clinique. :contentReference[oaicite:8]{index=8}  
+Dans ce cas :
+- soit tu saisis les **T-scores** directement,
+- soit tu développes une fonction de conversion si tu disposes des correspondances numériques (à fournir au projet).
 
-### Domaines
-- **N — Névrosisme** : tendance aux affects négatifs, sensibilité au stress.
-- **E — Extraversion** : énergie sociale, engagement, affect positif.
-- **O — Ouverture** : curiosité, imagination, complexité psychologique.
-- **A — Agréabilité** : coopération, empathie, confiance.
-- **C — Conscience** : organisation, contrôle de soi, persévérance.
+## 3) Bandes (catégories)
+Les seuils doivent suivre les normes retenues.
+Si tu n’as que des T-scores :
+- configurer des bandes paramétrables dans l’app (ex. Très élevé, etc.)
+- documenter la règle dans le rapport
 
-## 2) Principes de lecture (clinique)
-1. **Commencer par les domaines**, puis préciser avec les facettes.
-2. **Rechercher la cohérence interne** (un domaine élevé + facettes concordantes).
-3. **Interpréter en contexte** : âge, culture, situation clinique, objectif de l’évaluation.
-4. **Attention aux réponses invalides** (beaucoup de blancs, trop de “N”, etc.) ; le manuel consacre des sections à l’administration/cotation et à la validité. :contentReference[oaicite:5]{index=5}
+## 4) Contrôles
+- vérifier que la norme couvre bien toutes les échelles (5 domaines + 30 facettes)
+- vérifier la cohérence des conversions (pas de trous)
+- tracer des tests unitaires : raw→T attendu sur quelques points
 
-## 3) Détails des 30 facettes (rappel)
-- **N1** Anxiété • **N2** Hostilité • **N3** Dépression • **N4** Timidité/Gêne sociale • **N5** Impulsivité • **N6** Vulnérabilité  
-- **E1** Chaleur • **E2** Grégarité • **E3** Assertivité • **E4** Activité • **E5** Recherche d'excitation • **E6** Émotions positives  
-- **O1** Imagination • **O2** Esthétique • **O3** Sentiments • **O4** Actions • **O5** Idées • **O6** Valeurs  
-- **A1** Confiance • **A2** Franchise • **A3** Altruisme • **A4** Compliance • **A5** Modestie • **A6** Tendresse  
-- **C1** Compétence • **C2** Ordre • **C3** Sens du devoir • **C4** Effort/Réussite • **C5** Autodiscipline • **C6** Délibération  
-
-## 4) Normes et interprétation “standardisée”
-Les décisions cliniques se font généralement sur des **scores normés** (T-scores, percentiles, etc.).  
-Ce dépôt ne fournit pas les tables propriétaires : utilise `docs/normes_TEMPLATE.csv` et renseigne tes normes officielles.
-
-## 5) Exemple de rédaction (modèle)
-- **Synthèse domaines** : N=…, E=…, O=…, A=…, C=… (scores bruts puis normés)
-- **Points saillants** : facettes extrêmes + cohérence
-- **Implications cliniques** : hypothèses, ressources, vulnérabilités
-- **Limites** : validité, contexte, biais, coopération du sujet
+## 5) Confidentialité / conformité
+Ne pas commiter de pages scannées de tables si c’est interdit.
+Conserver uniquement les fichiers nécessaires à l’usage clinique autorisé.
