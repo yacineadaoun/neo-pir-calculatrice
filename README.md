@@ -1,15 +1,20 @@
-# NEO PI-R — Calculatrice Manuelle (Streamlit)
+# NEO PI-R — Calculatrice Clinique Pro 2026
 
-Application Streamlit pour saisir manuellement les 240 réponses (FD/D/N/A/FA),
-appliquer les règles du protocole, calculer les scores (30 facettes + 5 domaines),
-afficher un profil graphique, et exporter CSV/PDF.
+Application Streamlit pour correction **manuelle ultra rapide** :
+**1 item → gros boutons (3+2) → item suivant**, avec calcul instantané, sauvegarde SQLite et exports.
 
-## Fichiers requis
-- `app.py`
-- `scoring_key.csv` (obligatoire, 240 items, colonnes: item, FD, D, N, A, FA)
-- `requirements.txt`
+## Fonctionnalités
+- Saisie item par item (240 items)
+- Boutons XXL adaptés mobile/tablette
+- Passage automatique à l'item suivant
+- Flash vert + son discret (optionnels)
+- Mode sombre / clair
+- Reset de la réponse (VIDE)
+- Gestion patients (création / suppression avec backup DB)
+- Règles protocole (items vides / N observés / imputation)
+- Résultats: domaines + facettes
+- Exports: CSV / PDF / PNG
 
-## Lancer en local
+## Installation
 ```bash
 pip install -r requirements.txt
-streamlit run app.py
