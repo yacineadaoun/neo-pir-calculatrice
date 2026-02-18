@@ -497,32 +497,32 @@ st.markdown(
 .pro-card {{
   background: {panel};
   border: 1px solid {border};
-  border-radius: 15px;
-  padding: 115px 15px;
+  border-radius: 18px;
+  padding: 16px 18px;
 }}
 
 /* Live band */
 .liveband {{
   display:flex;
-  gap:15px;
+  gap:14px;
   align-items:center;
   justify-content:space-between;
   background:{panel};
   border:1px solid {border};
-  border-radius:15px;
-  padding:15px 15px;
-  margin-bottom: 15px;
+  border-radius:18px;
+  padding:14px 18px;
+  margin-bottom: 14px;
 }}
 .liveband .kpi {{
   display:flex;
-  gap:14px;
+  gap:18px;
   align-items:center;
 }}
 .k {{
   display:flex; flex-direction:column;
 }}
 .k .lab {{ font-size: 12px; color: {muted}; }}
-.k .val {{ font-size: 14px; font-weight: 800; color: {text}; }}
+.k .val {{ font-size: 22px; font-weight: 800; color: {text}; }}
 
 /* Flash green bar */
 .flash-ok {{
@@ -537,10 +537,10 @@ st.markdown(
 
 /* SUPER BIG buttons (responses) */
 div.stButton > button {{
-  height: 14px !important;
-  font-size: 14px !important;
+  height: 170px !important;
+  font-size: 54px !important;
   font-weight: 900 !important;
-  border-radius: 14px !important;
+  border-radius: 26px !important;
   width: 100% !important;
   border: 2px solid {border} !important;
 }}
