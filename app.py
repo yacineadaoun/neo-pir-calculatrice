@@ -481,8 +481,7 @@ st.progress(answered / 240)
 
 # TABS PRO
 tabs = st.tabs(["1️⃣ Saisie", "2️⃣ Scores", "3️⃣ Exports"])
-
-# TAB 1: SAISIE 5 BOUTONS XXL
+# TAB 1: SAISIE 5 BOUTONS XXL (CORRIGÉ)
 with tabs[0]:
     st.markdown("<div class='neo-panel neo-fadein'>", unsafe_allow_html=True)
     
@@ -492,61 +491,93 @@ with tabs[0]:
         item = st.number_input("Item actuel", 1, 240, st.session_state.current_item)
         st.session_state.current_item = int(item)
     with col2:
-        st.number_input("Sauter à", 1, 240, format="%d", label_visibility="collapsed")
+        jump = st.number_input("Sauter à", 1, 240, format="%d", label_visibility="collapsed")
+        if int(jump) != int(st.session_state.current_item):
+            st.session_state.current_item = int(jump)
+            st.rerun()
     with col3:
-        if st.button("➡️ Prochain vide"): 
-            for i in range(st.session_state.current_item, 241):
-                if responses[i] == -1: st.session_state.current_item = i; st.rerun(); break
+        if st.button("➡️ Prochain vide"):
+            cur = int(st.session_state.current_item)
+            for i in range(cur, 241):
+                if responses.get(i, -1) == -1:
+                    st.session_state.current_item = i
+                    st.rerun()
+                    break
     
     # Info courant
     cur_item = int(st.session_state.current_item)
-    cur_opt = "🕳️ VIDE" if responses[cur_item] == -1 else IDX_TO_OPT[responses[cur_item]]
+    cur_idx = responses.get(cur_item, -1)
+    cur_opt = "🕳️ VIDE" if cur_idx == -1 else IDX_TO_OPT[cur_idx]
     fac = item_to_facette.get(cur_item, "?")
-    st.columns(3)[1].metric("Réponse", cur_opt)
-    st.caption(f"**{fac}** • {cur_item}/240")
+    dom = facettes_to_domain.get(fac, "?")
+    
+    col_info1, col_info2, col_info3 = st.columns(3)
+    col_info1.metric("Item", f"{cur_item}/240")
+    col_info2.metric("Réponse", cur_opt)
+    col_info3.metric("Facette", f"{fac} ({dom})")
     
     # Reset
-    if st.button("🧹 Vider cet item", key="reset"):
+    if st.button("🧹 Vider cet item", key="reset_item"):
         reset_response(patient_id, cur_item)
+        st.session_state.last_saved = True
         st.rerun()
     
-    # 5 BOUTONS XXL (N centrée large)
+    # 🔥 5 BOUTONS XXL CORRIGÉS (syntaxe Python pure)
     st.markdown("### 📊 Choisir réponse")
     flash_class = "neo-flash-ok" if st.session_state.last_saved and st.session_state.flash_ok else ""
     st.markdown(f"<div class='{flash_class} neo-btn-grid-5'>", unsafe_allow_html=True)
     
-    cols = st.columns([1, 1, 1.8, 1, 1])  # N plus large
     clicked = None
-    with cols[0]: if st.button("FD", key="fd"): clicked = 0
-    with cols[1]: if st.button("D", key="d"): clicked = 1
-    with cols[2]: if st.button("N", key="n"): clicked = 2
-    with cols[3]: if st.button("A", key="a"): clicked = 3
-    with cols[4]: if st.button("FA", key="fa"): clicked = 4
+    
+    # Ligne 1: FD D N (large)
+    col_fd, col_d, col_n = st.columns([1, 1, 1.5])
+    with col_fd:
+        if st.button("FD", key="btn_fd"): clicked = 0
+    with col_d:
+        if st.button("D", key="btn_d"): clicked = 1
+    with col_n:
+        if st.button("N", key="btn_n"): clicked = 2
+    
+    # Ligne 2: A FA
+    col_a, col_fa = st.columns([1, 1])
+    with col_a:
+        if st.button("A", key="btn_a"): clicked = 3
+    with col_fa:
+        if st.button("FA", key="btn_fa"): clicked = 4
     
     st.markdown("</div>", unsafe_allow_html=True)
     
-    # Action + feedback
+    # Action + feedback PRO
     if clicked is not None:
         save_response(patient_id, cur_item, clicked)
         st.session_state.last_saved = True
-        if st.session_state.sound_ok: play_beep_once()
-        if answered > 192 and cur_item < 240:  # Auto-avance fin
-            st.session_state.current_item += 1
+        
+        if st.session_state.sound_ok:
+            play_beep_once()
+        
+        # Auto-avance intelligente
+        if answered > 192 and cur_item < 240:
+            st.session_state.current_item = cur_item + 1
+        
         st.rerun()
     
-    # Nav rapide
-    cols = st.columns(4)
-    for i, (sym, delta) in enumerate([("⬅️", -1), ("➡️", 1), ("⏭️", 10), ("⏮️", -10)]):
-        with cols[i]:
-            if st.button(sym, key=f"nav_{i}"):
-                st.session_state.current_item = max(1, min(240, cur_item + delta))
-                st.rerun()
+    # Navigation rapide
+    col_nav1, col_nav2, col_nav3, col_nav4 = st.columns(4)
+    with col_nav1:
+        if st.button("⬅️ -1"): st.session_state.current_item = max(1, cur_item-1); st.rerun()
+    with col_nav2:
+        if st.button("➡️ +1"): st.session_state.current_item = min(240, cur_item+1); st.rerun()
+    with col_nav3:
+        if st.button("⏭️ +10"): st.session_state.current_item = min(240, cur_item+10); st.rerun()
+    with col_nav4:
+        if st.button("⏮️ -10"): st.session_state.current_item = max(1, cur_item-10); st.rerun()
     
     st.markdown("</div>", unsafe_allow_html=True)
     
-    if st.session_state.last_saved: st.session_state.last_saved = False
-
-# TAB 2: SCORES
+    # Reset flash après render
+    if st.session_state.last_saved:
+        st.session_state.last_saved = False
+        # TAB 2: SCORES
 with tabs[1]:
     st.markdown("<div class='neo-panel neo-fadein'>", unsafe_allow_html=True)
     
