@@ -497,8 +497,8 @@ st.markdown(
 .pro-card {{
   background: {panel};
   border: 1px solid {border};
-  border-radius: 18px;
-  padding: 16px 18px;
+  border-radius: 10px;
+  padding: 16px 10px;
 }}
 
 /* Live band */
