@@ -78,11 +78,8 @@ facet_bases = {
     "E1": [2],  "E2": [7],  "E3": [12], "E4": [17], "E5": [22], "E6": [27],
     "O1": [3],  "O2": [8],  "O3": [13], "O4": [18], "O5": [23], "O6": [28],
     "A1": [4],  "A2": [9],  "A3": [14], "A4": [19], "A5": [24], "A6": [29],
-    "C1": [5],  "C2": [10], "C3": [15], "C4": [20], "C5": [25 indicate], "C6": [30],
+    "C1": [5],  "C2": [10], "C3": [15], "C4": [20], "C5": [25], "C6": [30],
 }
-
-# FIX: accidental "indicate" token could break. Correct it:
-facet_bases["C5"] = [25]
 
 item_to_facette: Dict[int, str] = {}
 for fac, bases in facet_bases.items():
