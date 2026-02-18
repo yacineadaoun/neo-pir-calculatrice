@@ -1,20 +1,12 @@
-# NEO PI-R — Calculatrice Clinique Pro 2026
+# NEO PI-R — Calculatrice Pro 2026 (Cabinet)
 
-Application Streamlit pour correction **manuelle ultra rapide** :
-**1 item → gros boutons (3+2) → item suivant**, avec calcul instantané, sauvegarde SQLite et exports.
-
-## Fonctionnalités
-- Saisie item par item (240 items)
-- Boutons XXL adaptés mobile/tablette
-- Passage automatique à l'item suivant
-- Flash vert + son discret (optionnels)
-- Mode sombre / clair
-- Reset de la réponse (VIDE)
-- Gestion patients (création / suppression avec backup DB)
-- Règles protocole (items vides / N observés / imputation)
-- Résultats: domaines + facettes
-- Exports: CSV / PDF / PNG
+Workflow clinique ultra rapide : **1 item → 5 boutons → item suivant**  
+- Saisie manuelle assistée (240 items)
+- Sauvegarde automatique SQLite
+- Protocole (blancs / N / imputations) paramétrable
+- Exports CSV / PDF + graphiques
 
 ## Installation
 ```bash
 pip install -r requirements.txt
+streamlit run app.py
