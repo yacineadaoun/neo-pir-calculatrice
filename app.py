@@ -497,21 +497,21 @@ st.markdown(
 .pro-card {{
   background: {panel};
   border: 1px solid {border};
-  border-radius: 10px;
-  padding: 16px 10px;
+  border-radius: 15px;
+  padding: 115px 15px;
 }}
 
 /* Live band */
 .liveband {{
   display:flex;
-  gap:14px;
+  gap:15px;
   align-items:center;
   justify-content:space-between;
   background:{panel};
   border:1px solid {border};
-  border-radius:14px;
-  padding:14px 14px;
-  margin-bottom: 14px;
+  border-radius:15px;
+  padding:15px 15px;
+  margin-bottom: 15px;
 }}
 .liveband .kpi {{
   display:flex;
