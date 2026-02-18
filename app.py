@@ -509,20 +509,20 @@ st.markdown(
   justify-content:space-between;
   background:{panel};
   border:1px solid {border};
-  border-radius:18px;
-  padding:14px 18px;
+  border-radius:14px;
+  padding:14px 14px;
   margin-bottom: 14px;
 }}
 .liveband .kpi {{
   display:flex;
-  gap:18px;
+  gap:14px;
   align-items:center;
 }}
 .k {{
   display:flex; flex-direction:column;
 }}
 .k .lab {{ font-size: 12px; color: {muted}; }}
-.k .val {{ font-size: 22px; font-weight: 800; color: {text}; }}
+.k .val {{ font-size: 14px; font-weight: 800; color: {text}; }}
 
 /* Flash green bar */
 .flash-ok {{
@@ -537,10 +537,10 @@ st.markdown(
 
 /* SUPER BIG buttons (responses) */
 div.stButton > button {{
-  height: 170px !important;
-  font-size: 54px !important;
+  height: 14px !important;
+  font-size: 14px !important;
   font-weight: 900 !important;
-  border-radius: 26px !important;
+  border-radius: 14px !important;
   width: 100% !important;
   border: 2px solid {border} !important;
 }}
