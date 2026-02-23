@@ -1,827 +1,640 @@
-# app.py — NEO PI-R Calculatrice Pro 2026 (Cabinet)
-# Workflow: 1 item -> 5 boutons -> item suivant
-# Auteur: ADAOUN YACINE
-# Améliorations: 
-# - Complétion du code (partie principale de l'app)
-# - Amélioration de l'UI/UX: barre de progression, navigation fluide, confirmation suppression
-# - Intégration CSS améliorée: plus responsive, animations subtiles, meilleure compatibilité mobile
-# - Adaptation des graphiques au thème (clair/sombre)
-# - Gestion des erreurs renforcée
-# - Ajout de feedback visuel/sonore configurable
-# - Optimisation des performances (caching où possible)
-
+# app.py
 from __future__ import annotations
 
 import io
 import os
-import csv
-import sqlite3
 import shutil
-from datetime import datetime
+import sqlite3
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
+import pandas as pd
 import streamlit as st
-import numpy as np
-import matplotlib.pyplot as plt
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas as pdf_canvas
-import streamlit.components.v1 as components
+from reportlab.pdfgen import canvas
 
+# =========================
+# Configuration
+# =========================
+APP_DIR = Path(__file__).parent if "__file__" in globals() else Path(".")
+DATA_DIR = APP_DIR / "data"
+DATA_DIR.mkdir(exist_ok=True)
 
-# ============================================================
-# CONFIG
-# ============================================================
-APP_TITLE = "🧮 NEO PI-R — Calculatrice Pro 2026 (Cabinet) | ADAOUN YACINE"
-DB_PATH = "neo_pir.db"
-SCORING_KEY_CSV = "scoring_key.csv"
+DB_PATH = DATA_DIR / "neo_pir.db"
 
-OPTIONS = ["FD", "D", "N", "A", "FA"]  # idx 0..4
-OPT_TO_IDX = {k: i for i, k in enumerate(OPTIONS)}
-IDX_TO_OPT = {i: k for k, i in OPT_TO_IDX.items()}
+ITEMS_CSV = DATA_DIR / "items.csv"          # optionnel: colonnes: item_id, text
+SCORING_KEY_CSV = DATA_DIR / "scoring_key.csv"  # optionnel: colonnes mini: item_id, reverse (0/1) ou direction (+1/-1)
 
+TOTAL_ITEMS = 240
+RESP_LABELS = ["FD", "D", "N", "A", "FA"]   # indices 0..4
+BLANK_IDX = -1                               # pas répondu
 
-# ============================================================
-# SCORING KEY
-# ============================================================
-@st.cache_data(show_spinner=False)
-def load_scoring_key(path: str) -> Dict[int, List[int]]:
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"'{path}' introuvable. Ajoute scoring_key.csv à la racine du repo."
-        )
-    key: Dict[int, List[int]] = {}
-    with open(path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        required_cols = {"item", "FD", "D", "N", "A", "FA"}
-        if not required_cols.issubset(set(reader.fieldnames or [])):
-            raise ValueError(f"Colonnes attendues: {sorted(required_cols)}")
+# Règles (ajuste si besoin)
+MAX_BLANKS_INVALID = 15
+MAX_NEUTRAL_INVALID = 42
+IMPUTE_IF_BLANKS_LEQ = 10
+IMPUTE_TO_IDX = 2  # "N"
 
-        for row in reader:
-            item = int(row["item"])
-            key[item] = [
-                int(row["FD"]), int(row["D"]), int(row["N"]), int(row["A"]), int(row["FA"])
-            ]
+RULES_VERSION = "v1.0 (blanc>=15 invalide; N>=42 invalide; si blancs<=10 => impute N)"
 
-    missing = [i for i in range(1, 241) if i not in key]
-    if missing:
-        raise ValueError(f"scoring_key.csv incomplet. Items manquants: {missing[:20]}")
-    return key
+# SQLite pragmas
+DEFAULT_BUSY_TIMEOUT_MS = 5000
 
+# =========================
+# Helpers / Validation
+# =========================
+def clamp_int(x: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, x))
 
-# ============================================================
-# MAPPINGS NEO PI-R (5 domaines + 30 facettes)
-# ============================================================
-facet_bases = {
-    "N1": [1],  "N2": [6],  "N3": [11], "N4": [16], "N5": [21], "N6": [26],
-    "E1": [2],  "E2": [7],  "E3": [12], "E4": [17], "E5": [22], "E6": [27],
-    "O1": [3],  "O2": [8],  "O3": [13], "O4": [18], "O5": [23], "O6": [28],
-    "A1": [4],  "A2": [9],  "A3": [14], "A4": [19], "A5": [24], "A6": [29],
-    "C1": [5],  "C2": [10], "C3": [15], "C4": [20], "C5": [25], "C6": [30],
-}
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
 
-item_to_facette: Dict[int, str] = {}
-for fac, bases in facet_bases.items():
-    for b in bases:
-        for k in range(0, 240, 30):
-            item_to_facette[b + k] = fac
+def facet_index_for_item(item_id: int) -> int:
+    # 30 facettes; facette k = {k, k+30, ..., k+210}
+    return ((item_id - 1) % 30) + 1  # 1..30
 
-facettes_to_domain = {
-    **{f"N{i}": "N" for i in range(1, 7)},
-    **{f"E{i}": "E" for i in range(1, 7)},
-    **{f"O{i}": "O" for i in range(1, 7)},
-    **{f"A{i}": "A" for i in range(1, 7)},
-    **{f"C{i}": "C" for i in range(1, 7)},
-}
+def domain_for_facet(facet_idx: int) -> str:
+    # 5 domaines x 6 facettes: 1-6 N, 7-12 E, 13-18 O, 19-24 A, 25-30 C
+    if 1 <= facet_idx <= 6:
+        return "N"
+    if 7 <= facet_idx <= 12:
+        return "E"
+    if 13 <= facet_idx <= 18:
+        return "O"
+    if 19 <= facet_idx <= 24:
+        return "A"
+    return "C"
 
-domain_labels = {
-    "N": "Névrosisme",
-    "E": "Extraversion",
-    "O": "Ouverture",
-    "A": "Agréabilité",
-    "C": "Conscience",
-}
-
-facette_labels = {
-    "N1": "Anxiété",
-    "N2": "Hostilité",
-    "N3": "Dépression",
-    "N4": "Timidité / Gêne sociale",
-    "N5": "Impulsivité",
-    "N6": "Vulnérabilité",
-
-    "E1": "Chaleur",
-    "E2": "Grégarité",
-    "E3": "Assertivité",
-    "E4": "Activité",
-    "E5": "Recherche d'excitation",
-    "E6": "Émotions positives",
-
-    "O1": "Imagination",
-    "O2": "Esthétique",
-    "O3": "Sentiments",
-    "O4": "Actions",
-    "O5": "Idées",
-    "O6": "Valeurs",
-
-    "A1": "Confiance",
-    "A2": "Franchise",
-    "A3": "Altruisme",
-    "A4": "Compliance",
-    "A5": "Modestie",
-    "A6": "Tendresse",
-
-    "C1": "Compétence",
-    "C2": "Ordre",
-    "C3": "Sens du devoir",
-    "C4": "Effort / Réussite",
-    "C5": "Autodiscipline",
-    "C6": "Délibération",
-}
-
-
-# ============================================================
-# PROTOCOLE (paramétrable)
-# ============================================================
-@dataclass(frozen=True)
-class ProtocolRules:
-    max_blank_invalid: int = 15   # >= 15 blancs => invalide
-    max_N_invalid: int = 42       # >= 42 réponses "N" => invalide
-    impute_blank_if_leq: int = 10 # <= 10 blancs => imputation en N
-    impute_option_index: int = 2  # N
-
-
-# ============================================================
-# DB (SQLite) — robuste + migration
-# ============================================================
+# =========================
+# DB Layer
+# =========================
 @contextmanager
-def db_ctx():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
+def db_conn():
+    # Connexion courte par transaction = safe en Streamlit multi-sessions
+    conn = sqlite3.connect(
+        DB_PATH,
+        timeout=DEFAULT_BUSY_TIMEOUT_MS / 1000.0,
+        isolation_level=None,  # autocommit, on gère BEGIN/COMMIT
+    )
     try:
+        conn.execute("PRAGMA foreign_keys = ON;")
+        conn.execute(f"PRAGMA busy_timeout = {DEFAULT_BUSY_TIMEOUT_MS};")
+        conn.execute("PRAGMA journal_mode = WAL;")
+        # Choix perf vs durabilité:
+        conn.execute("PRAGMA synchronous = NORMAL;")
         yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
     finally:
         conn.close()
 
-
-def table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
-    return [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
-
-
-def init_db():
-    with db_ctx() as conn:
+def db_init():
+    with db_conn() as conn:
+        conn.execute("BEGIN;")
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS patients (
-            patient_id TEXT PRIMARY KEY,
-            name TEXT,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
+            CREATE TABLE IF NOT EXISTS patients (
+                patient_id TEXT PRIMARY KEY,
+                full_name TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
         """)
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS responses (
-            patient_id TEXT NOT NULL,
-            item_id INTEGER NOT NULL,
-            response_idx INTEGER NOT NULL,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (patient_id, item_id)
-        )
+            CREATE TABLE IF NOT EXISTS responses (
+                patient_id TEXT NOT NULL,
+                item_id INTEGER NOT NULL CHECK(item_id BETWEEN 1 AND 240),
+                response_idx INTEGER NOT NULL CHECK(response_idx BETWEEN -1 AND 4),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (patient_id, item_id),
+                FOREIGN KEY(patient_id) REFERENCES patients(patient_id) ON DELETE CASCADE
+            );
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS app_meta (
+                k TEXT PRIMARY KEY,
+                v TEXT NOT NULL
+            );
+        """)
+        conn.execute("COMMIT;")
 
-        # Migration depuis anciennes versions (ex: colonne "response")
-        cols = table_columns(conn, "responses")
-        if "response" in cols and "response_idx" not in cols:
-            conn.execute("ALTER TABLE responses ADD COLUMN response_idx INTEGER;")
-            conn.execute("UPDATE responses SET response_idx = response WHERE response_idx IS NULL;")
-            conn.execute("UPDATE responses SET response_idx = -1 WHERE response_idx IS NULL;")
+    run_migrations()
 
+def get_user_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version;").fetchone()[0])
 
-def upsert_patient(patient_id: str, name: str):
-    with db_ctx() as conn:
+def set_user_version(conn: sqlite3.Connection, v: int) -> None:
+    conn.execute(f"PRAGMA user_version = {int(v)};")
+
+def run_migrations():
+    """
+    Migrations incrémentales. Exemple: si tu avais une ancienne colonne 'response'
+    -> 'response_idx'. Ici on met un squelette prêt à étendre.
+    """
+    with db_conn() as conn:
+        uv = get_user_version(conn)
+        if uv >= 1:
+            return
+
+        # Migration v0 -> v1 (placeholder)
+        conn.execute("BEGIN;")
+        # ... ajouter ici des ALTER TABLE / data backfills si nécessaire ...
+        set_user_version(conn, 1)
+        conn.execute("COMMIT;")
+
+def list_patients() -> List[Tuple[str, str, str]]:
+    with db_conn() as conn:
+        rows = conn.execute(
+            "SELECT patient_id, full_name, created_at FROM patients ORDER BY created_at DESC;"
+        ).fetchall()
+    return [(r[0], r[1], r[2]) for r in rows]
+
+def create_patient(patient_id: str, full_name: str) -> None:
+    patient_id = patient_id.strip()
+    full_name = full_name.strip()
+    if not patient_id or not full_name:
+        raise ValueError("patient_id et full_name requis.")
+    with db_conn() as conn:
+        conn.execute("BEGIN;")
         conn.execute(
-            "INSERT INTO patients(patient_id, name) VALUES(?, ?) "
-            "ON CONFLICT(patient_id) DO UPDATE SET name=excluded.name",
-            (patient_id, name),
+            "INSERT INTO patients(patient_id, full_name, created_at) VALUES(?,?,?);",
+            (patient_id, full_name, now_iso()),
         )
+        conn.execute("COMMIT;")
 
+def delete_patient(patient_id: str, make_backup: bool = True) -> None:
+    if make_backup and DB_PATH.exists():
+        backup_dir = DATA_DIR / "backups"
+        backup_dir.mkdir(exist_ok=True)
+        safe_pid = "".join(c for c in patient_id if c.isalnum() or c in ("-", "_"))[:40]
+        backup_path = backup_dir / f"neo_pir_backup_{safe_pid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+        shutil.copy2(DB_PATH, backup_path)
 
-def delete_patient(patient_id: str) -> str:
-    if os.path.exists(DB_PATH):
-        backup_name = f"backup_{patient_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
-        shutil.copy2(DB_PATH, backup_name)
-    else:
-        backup_name = ""
+    with db_conn() as conn:
+        conn.execute("BEGIN;")
+        # ON DELETE CASCADE supprime automatiquement responses
+        conn.execute("DELETE FROM patients WHERE patient_id = ?;", (patient_id,))
+        conn.execute("COMMIT;")
 
-    with db_ctx() as conn:
-        conn.execute("DELETE FROM responses WHERE patient_id=?", (patient_id,))
-        conn.execute("DELETE FROM patients WHERE patient_id=?", (patient_id,))
-    return backup_name
-
-
-def list_patients(search: str = "") -> List[Tuple[str, str]]:
-    with db_ctx() as conn:
-        if search.strip():
-            q = f"%{search.strip()}%"
-            rows = conn.execute(
-                "SELECT patient_id, COALESCE(name,'') "
-                "FROM patients WHERE patient_id LIKE ? OR name LIKE ? "
-                "ORDER BY created_at DESC",
-                (q, q),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT patient_id, COALESCE(name,'') FROM patients ORDER BY created_at DESC"
-            ).fetchall()
-    return [(r[0], r[1]) for r in rows]
-
+def upsert_response(patient_id: str, item_id: int, response_idx: int) -> None:
+    item_id = clamp_int(int(item_id), 1, TOTAL_ITEMS)
+    response_idx = int(response_idx)
+    if response_idx not in (-1, 0, 1, 2, 3, 4):
+        raise ValueError("response_idx invalide.")
+    with db_conn() as conn:
+        conn.execute("BEGIN;")
+        conn.execute(
+            """
+            INSERT INTO responses(patient_id, item_id, response_idx, updated_at)
+            VALUES(?,?,?,?)
+            ON CONFLICT(patient_id, item_id) DO UPDATE SET
+                response_idx=excluded.response_idx,
+                updated_at=excluded.updated_at;
+            """,
+            (patient_id, item_id, response_idx, now_iso()),
+        )
+        conn.execute("COMMIT;")
 
 def load_responses(patient_id: str) -> Dict[int, int]:
-    with db_ctx() as conn:
+    with db_conn() as conn:
         rows = conn.execute(
-            "SELECT item_id, response_idx FROM responses WHERE patient_id=?",
+            "SELECT item_id, response_idx FROM responses WHERE patient_id = ?;",
             (patient_id,),
         ).fetchall()
+    return {int(item_id): int(idx) for item_id, idx in rows}
 
-    resp = {int(item): int(idx) for item, idx in rows}
-    for i in range(1, 241):
-        resp.setdefault(i, -1)
-    return resp
+def next_unanswered_item(resps: Dict[int, int]) -> int:
+    for i in range(1, TOTAL_ITEMS + 1):
+        if resps.get(i, BLANK_IDX) == BLANK_IDX:
+            return i
+    return TOTAL_ITEMS + 1  # terminé
 
+# =========================
+# Items / Scoring Key loading
+# =========================
+@st.cache_data(show_spinner=False)
+def load_items(items_path: str, mtime: float) -> Dict[int, str]:
+    p = Path(items_path)
+    if not p.exists():
+        return {i: f"Item {i}" for i in range(1, TOTAL_ITEMS + 1)}
+    df = pd.read_csv(p)
+    if "item_id" not in df.columns:
+        raise ValueError("items.csv doit contenir une colonne 'item_id'.")
+    text_col = "text" if "text" in df.columns else df.columns[-1]
+    mapping = {}
+    for _, r in df.iterrows():
+        iid = int(r["item_id"])
+        if 1 <= iid <= TOTAL_ITEMS:
+            mapping[iid] = str(r[text_col])
+    # fallback
+    for i in range(1, TOTAL_ITEMS + 1):
+        mapping.setdefault(i, f"Item {i}")
+    return mapping
 
-def save_response(patient_id: str, item_id: int, response_idx: int):
-    with db_ctx() as conn:
-        conn.execute(
-            "INSERT INTO responses(patient_id, item_id, response_idx) VALUES(?,?,?) "
-            "ON CONFLICT(patient_id, item_id) DO UPDATE SET "
-            "response_idx=excluded.response_idx, updated_at=CURRENT_TIMESTAMP",
-            (patient_id, item_id, response_idx),
+@st.cache_data(show_spinner=False)
+def load_scoring_key(scoring_path: str, mtime: float) -> Dict[int, int]:
+    """
+    Retourne direction par item: +1 normal, -1 reverse.
+    Supporte:
+      - colonne reverse (0/1)
+      - ou colonne direction (+1/-1)
+    """
+    p = Path(scoring_path)
+    if not p.exists():
+        # fallback: aucune inversion
+        return {i: +1 for i in range(1, TOTAL_ITEMS + 1)}
+
+    df = pd.read_csv(p)
+    if "item_id" not in df.columns:
+        raise ValueError("scoring_key.csv doit contenir 'item_id'.")
+
+    direction = {}
+    if "direction" in df.columns:
+        for _, r in df.iterrows():
+            iid = int(r["item_id"])
+            val = int(r["direction"])
+            direction[iid] = +1 if val >= 0 else -1
+    elif "reverse" in df.columns:
+        for _, r in df.iterrows():
+            iid = int(r["item_id"])
+            rev = int(r["reverse"])
+            direction[iid] = -1 if rev == 1 else +1
+    else:
+        # fallback: pas d’inversion
+        direction = {i: +1 for i in range(1, TOTAL_ITEMS + 1)}
+
+    for i in range(1, TOTAL_ITEMS + 1):
+        direction.setdefault(i, +1)
+    return direction
+
+# =========================
+# Scoring + Protocol rules
+# =========================
+@dataclass(frozen=True)
+class ProtocolResult:
+    status: str  # "valid" | "invalid"
+    blanks: int
+    neutral: int
+    imputed: int
+    reason: str
+
+def apply_protocol_rules(resps: Dict[int, int]) -> Tuple[Dict[int, int], ProtocolResult]:
+    blanks = sum(1 for i in range(1, TOTAL_ITEMS + 1) if resps.get(i, BLANK_IDX) == BLANK_IDX)
+    neutral = sum(1 for i in range(1, TOTAL_ITEMS + 1) if resps.get(i, BLANK_IDX) == IMPUTE_TO_IDX)
+    imputed = 0
+
+    if blanks >= MAX_BLANKS_INVALID:
+        return resps, ProtocolResult(
+            status="invalid",
+            blanks=blanks,
+            neutral=neutral,
+            imputed=0,
+            reason=f"Invalide: trop de blancs (>= {MAX_BLANKS_INVALID}).",
         )
 
+    if neutral >= MAX_NEUTRAL_INVALID:
+        return resps, ProtocolResult(
+            status="invalid",
+            blanks=blanks,
+            neutral=neutral,
+            imputed=0,
+            reason=f"Invalide: trop de réponses 'N' (>= {MAX_NEUTRAL_INVALID}).",
+        )
 
-def reset_item(patient_id: str, item_id: int):
-    save_response(patient_id, item_id, -1)
+    new_resps = dict(resps)
+    if blanks <= IMPUTE_IF_BLANKS_LEQ and blanks > 0:
+        for i in range(1, TOTAL_ITEMS + 1):
+            if new_resps.get(i, BLANK_IDX) == BLANK_IDX:
+                new_resps[i] = IMPUTE_TO_IDX
+                imputed += 1
 
+    return new_resps, ProtocolResult(
+        status="valid",
+        blanks=blanks,
+        neutral=neutral,
+        imputed=imputed,
+        reason="OK" if imputed == 0 else f"OK (imputation de {imputed} blancs vers 'N').",
+    )
 
-# ============================================================
-# CALCULS
-# ============================================================
-def apply_protocol_rules(responses: Dict[int, int], rules: ProtocolRules) -> Tuple[Dict[int, int], dict]:
-    blanks = [i for i, v in responses.items() if v == -1]
-    n_count = sum(1 for v in responses.values() if v == 2)
+def score_item(response_idx: int, direction: int) -> int:
+    """
+    Transforme idx 0..4 en score 0..4 puis applique reverse si direction=-1.
+    (Ajuste si ton barème réel diffère.)
+    """
+    if response_idx not in (0, 1, 2, 3, 4):
+        return 0
+    val = response_idx
+    if direction == -1:
+        val = 4 - val
+    return val
 
-    status = {
-        "valid": True,
-        "reasons": [],
-        "n_blank": len(blanks),
-        "n_count": n_count,
-        "imputed": 0,
-        "blank_items": blanks,
-    }
-
-    if status["n_blank"] >= rules.max_blank_invalid:
-        status["valid"] = False
-        status["reasons"].append(f"Trop d'items vides: {status['n_blank']} (>= {rules.max_blank_invalid})")
-
-    if status["n_count"] >= rules.max_N_invalid:
-        status["valid"] = False
-        status["reasons"].append(f"Trop de réponses 'N': {status['n_count']} (>= {rules.max_N_invalid})")
-
-    new_resp = dict(responses)
-    if status["valid"] and 0 < status["n_blank"] <= rules.impute_blank_if_leq:
-        for it in blanks:
-            new_resp[it] = rules.impute_option_index
-            status["imputed"] += 1
-
-    return new_resp, status
-
-
-def compute_scores(scoring_key: Dict[int, List[int]], responses: Dict[int, int]) -> Tuple[Dict[str, int], Dict[str, int]]:
-    facette_scores = {fac: 0 for fac in facette_labels.keys()}
-
-    for item_id, idx in responses.items():
-        if idx == -1:
+def compute_scores(resps: Dict[int, int], scoring_dir: Dict[int, int]) -> Tuple[Dict[int, int], Dict[str, int]]:
+    """
+    Returns:
+      facet_scores: {facet_idx: raw_sum}
+      domain_scores: {"N":sum facets 1..6, ...}
+    """
+    facet_scores: Dict[int, int] = {f: 0 for f in range(1, 31)}
+    for item_id in range(1, TOTAL_ITEMS + 1):
+        idx = resps.get(item_id, BLANK_IDX)
+        if idx == BLANK_IDX:
             continue
-        fac = item_to_facette.get(item_id)
-        if not fac:
-            continue
-        facette_scores[fac] += scoring_key[item_id][idx]
+        f = facet_index_for_item(item_id)
+        facet_scores[f] += score_item(idx, scoring_dir.get(item_id, +1))
 
-    domain_scores = {d: 0 for d in domain_labels.keys()}
-    for fac, sc in facette_scores.items():
-        domain_scores[facettes_to_domain[fac]] += sc
+    domain_scores = {"N": 0, "E": 0, "O": 0, "A": 0, "C": 0}
+    for f, sc in facet_scores.items():
+        domain_scores[domain_for_facet(f)] += sc
 
-    return facette_scores, domain_scores
+    return facet_scores, domain_scores
 
-
-# ============================================================
-# EXPORTS / GRAPHIQUES
-# ============================================================
-def plot_domains_radar(domain_scores: Dict[str, int], theme: str = "light"):
-    labels = ["N", "E", "O", "A", "C"]
-    values = [domain_scores[k] for k in labels]
-    values = values + values[:1]
-
-    angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
-    angles = angles + angles[:1]
-
-    fig = plt.figure(figsize=(6, 6))
-    ax = plt.subplot(111, polar=True)
-
-    # Adaptation au thème
-    bg_color = "#0b1220" if theme == "dark" else "#ffffff"
-    text_color = "#f8fafc" if theme == "dark" else "#0f172a"
-    line_color = "#3b82f6"  # Bleu pour visibilité
-    fill_color = "#3b82f6"  
-
-    fig.patch.set_facecolor(bg_color)
-    ax.set_facecolor(bg_color)
-    ax.plot(angles, values, color=line_color, linewidth=2)
-    ax.fill(angles, values, color=fill_color, alpha=0.1)
-    ax.set_thetagrids(np.degrees(angles[:-1]), [domain_labels[l] for l in labels])
-    ax.tick_params(colors=text_color)
-    ax.set_title("Domaines (scores bruts)", color=text_color)
-    for spine in ax.spines.values():
-        spine.set_edgecolor(text_color)
-    return fig
-
-
-def plot_facets_line(facette_scores: Dict[str, int], theme: str = "light"):
-    order = [f"{d}{i}" for d in "NEOAC" for i in range(1, 7)]
-    y = [facette_scores[k] for k in order]
-
-    fig = plt.figure(figsize=(16, 4.8))
-    ax = plt.gca()
-
-    # Adaptation au thème
-    bg_color = "#0b1220" if theme == "dark" else "#ffffff"
-    text_color = "#f8fafc" if theme == "dark" else "#0f172a"
-    line_color = "#3b82f6"
-    grid_color = "#94a3b8" if theme == "dark" else "#e2e8f0"
-
-    fig.patch.set_facecolor(bg_color)
-    ax.set_facecolor(bg_color)
-    ax.plot(range(len(order)), y, color=line_color, marker="o", linewidth=2)
-    ax.set_xticks(range(len(order)))
-    ax.set_xticklabels(order, rotation=45, ha="right", color=text_color)
-    ax.set_title("Facettes (scores bruts)", color=text_color)
-    ax.set_ylabel("Score brut", color=text_color)
-    ax.tick_params(axis='y', colors=text_color)
-    ax.grid(True, axis="y", linestyle="--", alpha=0.25, color=grid_color)
-    plt.tight_layout()
-    return fig
-
-
-def fig_to_bytes(fig, fmt: str) -> bytes:
-    buf = io.BytesIO()
-    fig.savefig(buf, format=fmt, bbox_inches="tight", dpi=160, facecolor=fig.get_facecolor())
-    buf.seek(0)
-    plt.close(fig)
-    return buf.getvalue()
-
-
-def build_pdf_report_bytes(
+# =========================
+# PDF
+# =========================
+def build_pdf_bytes(
     patient_id: str,
     patient_name: str,
-    status: dict,
-    facette_scores: Dict[str, int],
+    protocol: ProtocolResult,
+    facet_scores: Dict[int, int],
     domain_scores: Dict[str, int],
 ) -> bytes:
     buf = io.BytesIO()
-    c = pdf_canvas.Canvas(buf, pagesize=A4)
-    width, height = A4
+    c = canvas.Canvas(buf, pagesize=A4)
+    w, h = A4
 
-    y = height - 48
-    c.setFont("Helvetica-Bold", 15)
-    c.drawString(40, y, "RAPPORT NEO PI-R — Scores bruts")
-    y -= 22
+    y = h - 50
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(50, y, "NEO PI-R — Scores bruts")
+    y -= 24
 
-    c.setFont("Helvetica", 11)
-    c.drawString(40, y, f"Patient ID: {patient_id}")
+    c.setFont("Helvetica", 10)
+    c.drawString(50, y, f"Patient ID: {patient_id}")
     y -= 14
-    c.drawString(40, y, f"Nom: {patient_name}")
+    c.drawString(50, y, f"Nom: {patient_name}")
+    y -= 14
+    c.drawString(50, y, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     y -= 18
 
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(40, y, f"STATUT PROTOCOLE: {'VALIDE' if status['valid'] else 'INVALIDE'}")
-    y -= 16
-
-    c.setFont("Helvetica", 10)
-    c.drawString(40, y, f"Items vides: {status['n_blank']} | N observés: {status['n_count']} | Imputations: {status['imputed']}")
-    y -= 16
-
-    if status["reasons"]:
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(40, y, "Raisons:")
-        y -= 12
-        c.setFont("Helvetica", 9)
-        for r in status["reasons"]:
-            c.drawString(50, y, f"- {r}")
-            y -= 11
-        y -= 6
-
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(40, y, "DOMAINES (scores bruts)")
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(50, y, "Protocole")
     y -= 14
     c.setFont("Helvetica", 10)
-    for d in ["N", "E", "O", "A", "C"]:
-        c.drawString(40, y, f"{domain_labels[d]} ({d}): {domain_scores[d]}")
-        y -= 12
-    y -= 8
+    c.drawString(50, y, f"Statut: {protocol.status.upper()} — {protocol.reason}")
+    y -= 14
+    c.drawString(50, y, f"Blancs: {protocol.blanks} | N: {protocol.neutral} | Imputés: {protocol.imputed}")
+    y -= 14
+    c.drawString(50, y, f"Règles: {RULES_VERSION}")
+    y -= 22
 
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(40, y, "FACETTES (scores bruts)")
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(50, y, "Domaines (brut)")
+    y -= 14
+    c.setFont("Helvetica", 10)
+    for k in ["N", "E", "O", "A", "C"]:
+        c.drawString(60, y, f"{k}: {domain_scores.get(k, 0)}")
+        y -= 14
+
+    y -= 10
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(50, y, "Facettes (brut)")
     y -= 14
     c.setFont("Helvetica", 9)
-    for fac in sorted(facette_labels.keys()):
-        c.drawString(40, y, f"{fac} — {facette_labels[fac]}: {facette_scores[fac]}")
-        y -= 11
-        if y < 60:
-            c.showPage()
-            y = height - 48
-            c.setFont("Helvetica", 9)
 
+    # 30 facettes: 2 colonnes
+    left_x, right_x = 60, 320
+    y0 = y
+    for f in range(1, 16):
+        c.drawString(left_x, y0, f"F{f:02d}: {facet_scores.get(f, 0)}")
+        y0 -= 12
+    y1 = y
+    for f in range(16, 31):
+        c.drawString(right_x, y1, f"F{f:02d}: {facet_scores.get(f, 0)}")
+        y1 -= 12
+
+    c.showPage()
     c.save()
-    buf.seek(0)
     return buf.getvalue()
 
+# =========================
+# UI State + Callbacks
+# =========================
+def ensure_state():
+    st.session_state.setdefault("patient_id", "")
+    st.session_state.setdefault("patient_name", "")
+    st.session_state.setdefault("current_item", 1)
+    st.session_state.setdefault("sound_ok", False)
+    st.session_state.setdefault("pdf_bytes", None)
+    st.session_state.setdefault("last_saved_at", None)
 
-# ============================================================
-# FEEDBACK (son discret)
-# ============================================================
-def play_beep_once(volume: float = 0.25):
-    # bip ultra court (silence-compatible)
-    wav_b64 = "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA="
-    components.html(
-        f"""
-        <script>
-        try {{
-          const a = new Audio("data:audio/wav;base64,{wav_b64}");
-          a.volume = {volume};
-          a.play();
-        }} catch(e) {{}}
-        </script>
-        """,
-        height=0,
-    )
+def load_patient_into_state(patient_id: str, full_name: str):
+    st.session_state.patient_id = patient_id
+    st.session_state.patient_name = full_name
+    resps = load_responses(patient_id)
+    st.session_state.current_item = next_unanswered_item(resps)
 
+def on_answer(selected_idx: int):
+    pid = st.session_state.patient_id
+    if not pid:
+        st.warning("Sélectionne/crée un patient d'abord.")
+        return
 
-# ============================================================
-# CSS (amélioré: plus responsive, animations, compatibilité mobile)
-# ============================================================
-def inject_css(theme: str):
-    if theme == "dark":
-        bg = "#0b1220"
-        panel = "#0f172a"
-        text = "#f8fafc"
-        subtle = "#94a3b8"
-        border = "rgba(255,255,255,0.10)"
-        btn_bg = "#111c33"
-        accent = "#3b82f6"
-    else:
-        bg = "#f6f7fb"
-        panel = "#ffffff"
-        text = "#0f172a"
-        subtle = "#64748b"
-        border = "rgba(15,23,42,0.10)"
-        btn_bg = "#f1f5f9"
-        accent = "#2563eb"
+    item = int(st.session_state.current_item)
+    if item > TOTAL_ITEMS:
+        st.toast("Questionnaire déjà terminé.")
+        return
 
-    st.markdown(
-        f"""
-        <style>
-        .stApp {{
-          background: {bg};
-          color: {text};
-        }}
+    upsert_response(pid, item, int(selected_idx))
+    st.session_state.last_saved_at = now_iso()
+    st.session_state.pdf_bytes = None  # invalider PDF cache session
+    st.session_state.current_item = clamp_int(item + 1, 1, TOTAL_ITEMS + 1)
 
-        .neo-wrap {{
-          max-width: 1200px;
-          margin: 0 auto;
-          padding: 0 16px;
-        }}
+def on_prev():
+    st.session_state.current_item = clamp_int(int(st.session_state.current_item) - 1, 1, TOTAL_ITEMS + 1)
 
-        .neo-panel {{
-          background: {panel};
-          border: 1px solid {border};
-          border-radius: 22px;
-          padding: 24px;
-          box-shadow: 0 10px 24px rgba(0,0,0,0.10);
-          transition: all 0.3s ease;
-        }}
+def on_jump(item_id: int):
+    st.session_state.current_item = clamp_int(int(item_id), 1, TOTAL_ITEMS + 1)
 
-        .neo-subtle {{ color: {subtle}; }}
+# =========================
+# App
+# =========================
+def main():
+    st.set_page_config(page_title="NEO PI-R (Streamlit)", layout="wide")
+    ensure_state()
+    db_init()
 
-        .neo-kpi {{
-          display: grid;
-          grid-template-columns: repeat(6, 1fr);
-          gap: 12px;
-        }}
-        @media (max-width: 1024px) {{
-          .neo-kpi {{ grid-template-columns: repeat(3, 1fr); }}
-        }}
-        @media (max-width: 640px) {{
-          .neo-kpi {{ grid-template-columns: repeat(2, 1fr); }}
-        }}
-        .neo-kpi-card {{
-          background: {panel};
-          border: 1px solid {border};
-          border-radius: 16px;
-          padding: 12px;
-          text-align: center;
-          transition: transform 0.2s ease;
-        }}
-        .neo-kpi-card:hover {{
-          transform: translateY(-2px);
-        }}
-        .neo-kpi-title {{
-          font-size: 12px;
-          color: {subtle};
-          margin-bottom: 6px;
-        }}
-        .neo-kpi-value {{
-          font-size: 22px;
-          font-weight: 900;
-          letter-spacing: -0.02em;
-          color: {accent};
-        }}
+    # Load items + scoring (cache invalidable par mtime)
+    items_mtime = ITEMS_CSV.stat().st_mtime if ITEMS_CSV.exists() else 0.0
+    scoring_mtime = SCORING_KEY_CSV.stat().st_mtime if SCORING_KEY_CSV.exists() else 0.0
+    items = load_items(str(ITEMS_CSV), items_mtime)
+    scoring_dir = load_scoring_key(str(SCORING_KEY_CSV), scoring_mtime)
 
-        /* Boutons réponse XXL */
-        .neo-answer-row {{
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 12px;
-          margin-top: 16px;
-        }}
-        .neo-answer-row-2 {{
-          display: grid;
-          grid-template-columns: repeat(2, 1fr);
-          gap: 12px;
-          margin-top: 16px;
-        }}
-        @media (max-width: 1024px) {{
-          .neo-answer-row {{ grid-template-columns: repeat(2, 1fr); }}
-          .neo-answer-row-2 {{ grid-template-columns: 1fr; }}
-        }}
-        @media (max-width: 640px) {{
-          .neo-answer-row {{ grid-template-columns: 1fr; }}
-        }}
+    st.title("NEO PI-R — Passation & Scores bruts")
 
-        /* Applique au button Streamlit */
-        div.stButton > button {{
-          width: 100%;
-          height: 160px;
-          font-size: 64px;
-          font-weight: 900;
-          border-radius: 26px;
-          border: 2px solid {border};
-          background: {btn_bg};
-          color: {text};
-          transition: all 0.2s ease;
-        }}
-        div.stButton > button:hover {{
-          transform: translateY(-4px);
-          box-shadow: 0 12px 24px rgba(0,0,0,0.20);
-          background: {accent};
-          color: white;
-          border-color: {accent};
-        }}
+    # Sidebar patients
+    with st.sidebar:
+        st.header("Patients")
 
-        /* Boutons petits (nav/reset) */
-        .neo-small div.stButton > button {{
-          height: 56px;
-          font-size: 18px;
-          font-weight: 800;
-          border-radius: 14px;
-        }}
-
-        /* Flash vert "enregistré" */
-        .neo-flash {{
-          animation: neoFlash 0.5s ease-out;
-          border-radius: 14px;
-          padding: 12px 16px;
-          margin-top: 12px;
-          border: 1px solid rgba(34,197,94,0.35);
-          background: rgba(34,197,94,0.12);
-          color: #22c55e;
-        }}
-        @keyframes neoFlash {{
-          0% {{ transform: translateY(12px); opacity: 0; }}
-          100% {{ transform: translateY(0); opacity: 1; }}
-        }}
-
-        /* Barre de progression */
-        .stProgress > div > div > div > div {{
-          background-color: {accent};
-        }}
-
-        /* Amélioration globale: scroll fluide, transitions */
-        html {{ scroll-behavior: smooth; }}
-        * {{ transition: color 0.3s ease, background 0.3s ease; }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ============================================================
-# APP
-# ============================================================
-init_db()
-st.set_page_config(page_title=APP_TITLE, page_icon="🧮", layout="wide")
-
-# Session defaults
-if "theme" not in st.session_state:
-    st.session_state.theme = "light"
-if "flash_ok" not in st.session_state:
-    st.session_state.flash_ok = True
-if "sound_ok" not in st.session_state:
-    st.session_state.sound_ok = True
-if "current_item" not in st.session_state:
-    st.session_state.current_item = 1
-if "just_saved" not in st.session_state:
-    st.session_state.just_saved = False
-if "patient_id" not in st.session_state:
-    st.session_state.patient_id = ""
-if "patient_name" not in st.session_state:
-    st.session_state.patient_name = ""
-
-inject_css(st.session_state.theme)
-
-scoring_key = load_scoring_key(SCORING_KEY_CSV)
-
-# ---------------- Sidebar ----------------
-with st.sidebar:
-    st.markdown("### 👤 Patient")
-    st.session_state.theme = st.radio("Thème", ["light", "dark"], index=0 if st.session_state.theme == "light" else 1, key="theme_radio")
-    st.session_state.flash_ok = st.toggle("Flash vert", value=st.session_state.flash_ok)
-    st.session_state.sound_ok = st.toggle("Son discret", value=st.session_state.sound_ok)
-
-    st.markdown("---")
-    mode = st.radio("Mode", ["Ouvrir", "Créer"], horizontal=True)
-    search = st.text_input("Recherche (ID ou nom)", value="", key="search_input")
-    patients = list_patients(search)
-
-    patient_id = ""
-    patient_name = ""
-
-    if mode == "Ouvrir":
+        patients = list_patients()
         if patients:
-            labels = [f"{pid} — {name or 'Sans nom'}" for pid, name in patients]
-            sel = st.selectbox("Sélection", labels, index=0)
-            if sel:
-                patient_id = sel.split(" — ")[0].strip()
-                patient_name = next((n for p, n in patients if p == patient_id), "")
-                st.session_state.patient_id = patient_id
-                st.session_state.patient_name = patient_name
-        else:
-            st.info("Aucun patient. Passe en mode 'Créer'.")
-    else:
-        patient_id = st.text_input("ID patient (unique)", value="")
-        patient_name = st.text_input("Nom (optionnel)", value="")
-        if st.button("✅ Enregistrer", type="primary", disabled=(not patient_id.strip())):
+            labels = [f"{pid} — {name}" for pid, name, _ in patients]
+            default_idx = 0
+            current = st.session_state.patient_id
+            if current:
+                for i, (pid, _, _) in enumerate(patients):
+                    if pid == current:
+                        default_idx = i
+                        break
+
+            choice = st.selectbox("Sélection", labels, index=default_idx)
+            selected_pid = patients[labels.index(choice)][0]
+            selected_name = patients[labels.index(choice)][1]
+
+            if st.button("Charger patient", use_container_width=True):
+                load_patient_into_state(selected_pid, selected_name)
+                st.rerun()
+
+        st.divider()
+        st.subheader("Créer")
+        new_pid = st.text_input("Patient ID", placeholder="ex: P001")
+        new_name = st.text_input("Nom complet", placeholder="ex: Nom Prénom")
+
+        if st.button("Créer", type="primary", use_container_width=True):
             try:
-                upsert_patient(patient_id.strip(), patient_name.strip())
-                st.success("Patient enregistré.")
-                st.session_state.patient_id = patient_id.strip()
-                st.session_state.patient_name = patient_name.strip()
+                create_patient(new_pid, new_name)
+                st.success("Patient créé.")
+                load_patient_into_state(new_pid.strip(), new_name.strip())
                 st.rerun()
             except Exception as e:
-                st.error(f"Erreur: {str(e)}")
+                st.error(str(e))
 
-    st.markdown("---")
-    st.markdown("### ⚙️ Protocole")
-    rules = ProtocolRules(
-        max_blank_invalid=st.number_input("Items vides ⇒ invalide si ≥", 0, 240, 15),
-        max_N_invalid=st.number_input("Réponses 'N' ⇒ invalide si ≥", 0, 240, 42),
-        impute_blank_if_leq=st.number_input("Imputer si items vides ≤", 0, 240, 10),
-        impute_option_index=OPT_TO_IDX["N"],  # Fixé à N
-    )
-
-    st.markdown("---")
-    if st.session_state.patient_id:
-        if st.button("🗑️ Supprimer patient", type="secondary"):
-            with st.expander("Confirmer suppression", expanded=True):
-                confirm = st.text_input("Tape 'CONFIRMER' pour valider")
-                if confirm == "CONFIRMER":
-                    try:
-                        backup = delete_patient(st.session_state.patient_id)
-                        st.success(f"Patient supprimé. Backup: {backup}")
-                        st.session_state.patient_id = ""
-                        st.session_state.patient_name = ""
-                        st.session_state.current_item = 1
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Erreur: {str(e)}")
-
-# ---------------- Main Content ----------------
-if not st.session_state.patient_id:
-    st.info("Sélectionne ou crée un patient pour commencer.")
-else:
-    try:
-        responses = load_responses(st.session_state.patient_id)
-    except Exception as e:
-        st.error(f"Erreur chargement réponses: {str(e)}")
-        st.stop()
-
-    # Barre de progression
-    completed = sum(1 for v in responses.values() if v != -1)
-    progress = completed / 240
-    st.progress(progress, text=f"Progression: {completed}/240 ({int(progress*100)}%)")
-
-    # Affichage item courant
-    current_item = st.session_state.current_item
-    st.markdown(f"### Item {current_item}/240")
-    st.markdown(f"**Facette:** {item_to_facette.get(current_item, 'Inconnue')} — {facette_labels.get(item_to_facette.get(current_item), '')}")
-
-    # Boutons réponses (3 + 2)
-    cols_main = st.columns(3)
-    for i, opt in enumerate(OPTIONS[:3]):
-        with cols_main[i]:
-            if st.button(opt, key=f"btn_{opt}_{current_item}"):
-                save_response(st.session_state.patient_id, current_item, OPT_TO_IDX[opt])
-                if st.session_state.sound_ok:
-                    play_beep_once()
-                st.session_state.just_saved = True
-                if current_item < 240:
-                    st.session_state.current_item += 1
-                st.rerun()
-
-    cols_sec = st.columns(2)
-    for i, opt in enumerate(OPTIONS[3:]):
-        with cols_sec[i]:
-            if st.button(opt, key=f"btn_{opt}_{current_item}_sec"):
-                save_response(st.session_state.patient_id, current_item, OPT_TO_IDX[opt])
-                if st.session_state.sound_ok:
-                    play_beep_once()
-                st.session_state.just_saved = True
-                if current_item < 240:
-                    st.session_state.current_item += 1
-                st.rerun()
-
-    # Feedback flash
-    if st.session_state.just_saved and st.session_state.flash_ok:
-        st.markdown('<div class="neo-flash">Réponse enregistrée !</div>', unsafe_allow_html=True)
-        st.session_state.just_saved = False
-
-    # Navigation
-    nav_cols = st.columns([1, 2, 1, 1])
-    with nav_cols[0]:
-        if st.button("◀️ Précédent", disabled=(current_item <= 1)):
-            st.session_state.current_item -= 1
-            st.rerun()
-    with nav_cols[1]:
-        item_jump = st.number_input("Aller à l'item", 1, 240, current_item, key="jump_input")
-        if item_jump != current_item:
-            st.session_state.current_item = item_jump
-            st.rerun()
-    with nav_cols[2]:
-        if st.button("▶️ Suivant", disabled=(current_item >= 240)):
-            st.session_state.current_item += 1
-            st.rerun()
-    with nav_cols[3]:
-        if st.button("🔄 Reset item"):
-            reset_item(st.session_state.patient_id, current_item)
-            st.rerun()
-
-    # Calcul et affichage scores si complet
-    if completed == 240:
-        try:
-            imputed_responses, status = apply_protocol_rules(responses, rules)
-            facette_scores, domain_scores = compute_scores(scoring_key, imputed_responses)
-
-            st.markdown("---")
-            st.markdown("### Résultats")
-            if not status["valid"]:
-                st.error("Protocole invalide: " + " | ".join(status["reasons"]))
+        st.divider()
+        st.subheader("Suppression")
+        del_backup = st.checkbox("Faire un backup .db avant suppression", value=True)
+        if st.button("Supprimer patient chargé", use_container_width=True):
+            pid = st.session_state.patient_id
+            if not pid:
+                st.warning("Aucun patient chargé.")
             else:
-                st.success("Protocole valide.")
+                delete_patient(pid, make_backup=del_backup)
+                st.session_state.patient_id = ""
+                st.session_state.patient_name = ""
+                st.session_state.current_item = 1
+                st.session_state.pdf_bytes = None
+                st.success("Supprimé.")
+                st.rerun()
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.pyplot(plot_domains_radar(domain_scores, st.session_state.theme))
-            with col2:
-                st.pyplot(plot_facets_line(facette_scores, st.session_state.theme))
+        st.divider()
+        st.caption("Astuce: place `items.csv` et `scoring_key.csv` dans le dossier `data/`.")
 
-            # Téléchargement PDF
-            pdf_bytes = build_pdf_report_bytes(
-                st.session_state.patient_id,
-                st.session_state.patient_name,
-                status,
-                facette_scores,
-                domain_scores,
+    # Main area
+    pid = st.session_state.patient_id
+    pname = st.session_state.patient_name
+
+    if not pid:
+        st.info("Crée ou charge un patient depuis la barre latérale.")
+        return
+
+    tabs = st.tabs(["Passation", "Résultats & PDF"])
+
+    # ===== Passation =====
+    with tabs[0]:
+        resps = load_responses(pid)
+        current_item = int(st.session_state.current_item)
+
+        colA, colB, colC = st.columns([2, 1, 1])
+        with colA:
+            st.subheader(f"Patient: {pname} ({pid})")
+            st.caption(f"Dernière sauvegarde: {st.session_state.last_saved_at or '—'}")
+        with colB:
+            jump_to = st.number_input("Aller à l’item", min_value=1, max_value=TOTAL_ITEMS + 1, value=current_item)
+            if st.button("Go", use_container_width=True):
+                on_jump(int(jump_to))
+                st.rerun()
+        with colC:
+            st.metric("Progression", f"{min(current_item, TOTAL_ITEMS)}/{TOTAL_ITEMS}")
+
+        if current_item > TOTAL_ITEMS:
+            st.success("✅ Passation terminée.")
+        else:
+            st.markdown(f"### Item {current_item}")
+            st.write(items.get(current_item, f"Item {current_item}"))
+
+            answered = resps.get(current_item, BLANK_IDX)
+            if answered != BLANK_IDX:
+                st.info(f"Réponse existante: **{RESP_LABELS[answered]}** (tu peux écraser en cliquant un bouton)")
+
+            bcols = st.columns(5)
+            for i, lab in enumerate(RESP_LABELS):
+                with bcols[i]:
+                    st.button(
+                        lab,
+                        use_container_width=True,
+                        on_click=on_answer,
+                        args=(i,),
+                        # shortcuts utiles en passation:
+                        shortcut=f"{i+1}",
+                    )
+
+            nav1, nav2, nav3 = st.columns([1, 2, 1])
+            with nav1:
+                st.button("⬅️ Précédent", use_container_width=True, on_click=on_prev)
+            with nav2:
+                st.caption("Raccourcis: 1..5 pour FD..FA")
+            with nav3:
+                st.button("Recharger", use_container_width=True, on_click=lambda: st.rerun())
+
+    # ===== Résultats & PDF =====
+    with tabs[1]:
+        # fragment pour éviter de recalculer inutilement en passation
+        @st.fragment
+        def results_fragment():
+            resps = load_responses(pid)
+            resps2, protocol = apply_protocol_rules(resps)
+            facet_scores, domain_scores = compute_scores(resps2, scoring_dir)
+
+            st.subheader("Statut protocole")
+            if protocol.status == "valid":
+                st.success(protocol.reason)
+            else:
+                st.error(protocol.reason)
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Blancs", protocol.blanks)
+            c2.metric("N", protocol.neutral)
+            c3.metric("Imputés", protocol.imputed)
+
+            st.subheader("Domaines (brut)")
+            st.write(domain_scores)
+
+            st.subheader("Facettes (brut)")
+            df_facets = pd.DataFrame(
+                [{"facet": f"F{f:02d}", "domain": domain_for_facet(f), "score": facet_scores[f]} for f in range(1, 31)]
             )
-            st.download_button(
-                "📥 Télécharger PDF",
-                pdf_bytes,
-                file_name=f"neo_pir_{st.session_state.patient_id}.pdf",
-                mime="application/pdf",
-            )
-        except Exception as e:
-            st.error(f"Erreur calcul: {str(e)}")
-    else:
-        st.info(f"Complète les {240 - completed} items restants pour voir les résultats.")
+            st.dataframe(df_facets, use_container_width=True, hide_index=True)
+
+            st.divider()
+            st.subheader("PDF")
+            if st.button("Générer PDF", type="primary"):
+                st.session_state.pdf_bytes = build_pdf_bytes(
+                    patient_id=pid,
+                    patient_name=pname,
+                    protocol=protocol,
+                    facet_scores=facet_scores,
+                    domain_scores=domain_scores,
+                )
+                st.toast("PDF généré.")
+
+            if st.session_state.pdf_bytes:
+                st.download_button(
+                    "Télécharger PDF",
+                    data=st.session_state.pdf_bytes,
+                    file_name=f"NEO_PIR_{pid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            else:
+                st.caption("Clique sur “Générer PDF” puis télécharge.")
+
+        results_fragment()
+
+if __name__ == "__main__":
+    main()
